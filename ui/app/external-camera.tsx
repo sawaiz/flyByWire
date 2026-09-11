@@ -315,7 +315,9 @@ export function ExternalCamera() {
         if (active) {
           if (f.active && f.run_id && !capture.current) {
             if (!clock.current) await syncClock();
-            beginRecording(f.run_id);
+            // Defer recorder start so takeoff click / rAF are not blocked.
+            const runId = f.run_id;
+            window.setTimeout(() => beginRecording(runId), 0);
           }
           if (
             capture.current &&
@@ -348,76 +350,76 @@ export function ExternalCamera() {
     let last = 0;
     let lastVideoTime = -1;
     const trail: { x: number; y: number }[] = [];
+    let lastUi = 0;
     const tick = (now: number) => {
       frameId = requestAnimationFrame(tick);
-      const v = video.current,
-        c = canvas.current;
-      if (!v || !c || v.readyState < 2 || !v.videoWidth) return;
-      if (
-        last &&
-        now - last > 500 &&
-        tracker.current.box &&
-        !tracker.current.lost
-      ) {
-        tracker.current.lost = true;
-        setTrack({ status: 'lost', box: null, score: 0, dx: null, dy: null });
+      try {
+        const v = video.current,
+          c = canvas.current;
+        if (!v || !c || v.readyState < 2 || !v.videoWidth) return;
+        // A long frame gap (takeoff / MediaRecorder hitch) must NOT permanently
+        // kill the lock — skip this beat and let PatchTracker reacquire.
+        if (now - last < 100 || v.currentTime === lastVideoTime) return;
+        last = now;
+        lastVideoTime = v.currentTime;
+        c.width = 320;
+        c.height = Math.round((v.videoHeight / v.videoWidth) * 320);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return;
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        const pixels = ctx.getImageData(0, 0, c.width, c.height).data,
+          data = new Uint8Array(c.width * c.height);
+        for (let i = 0; i < data.length; i++)
+          data[i] =
+            (pixels[i * 4] + pixels[i * 4 + 1] * 2 + pixels[i * 4 + 2]) / 4;
+        gray.current = { width: c.width, height: c.height, data };
+        const result = tracker.current.update(gray.current);
+        // Throttle React updates; keep sample log at full tracker rate.
+        if (now - lastUi > 150) {
+          lastUi = now;
+          setTrack(result);
+        }
+        if (result.box) {
+          const b = result.box;
+          trail.push({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+          if (trail.length > 80) trail.shift();
+          ctx.strokeStyle = '#c8f28d';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(b.x, b.y, b.width, b.height);
+          ctx.beginPath();
+          trail.forEach((p, i) =>
+            i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y),
+          );
+          ctx.stroke();
+        } else trail.length = 0;
+        if (drag.current) {
+          ctx.strokeStyle = '#e8d995';
+          const end = dragEnd.current || drag.current;
+          ctx.strokeRect(
+            drag.current.x,
+            drag.current.y,
+            end.x - drag.current.x,
+            end.y - drag.current.y,
+          );
+        }
+        const rec = capture.current;
+        if (rec && rec.samples.length < 1800)
+          rec.samples.push({
+            elapsed_s: Math.max(0, (now - rec.started) / 1000),
+            received_monotonic_s: now / 1000 + rec.offset,
+            media_time_s: v.currentTime,
+            selection_id: selection.current,
+            status: result.status,
+            score: result.score,
+            box: result.box
+              ? [result.box.x, result.box.y, result.box.width, result.box.height]
+              : null,
+            dx: result.dx,
+            dy: result.dy,
+          });
+      } catch (e) {
+        console.warn('external tracker frame failed', e);
       }
-      if (now - last < 100 || v.currentTime === lastVideoTime) return;
-      const gap = last ? now - last : 0;
-      last = now;
-      lastVideoTime = v.currentTime;
-      c.width = 320;
-      c.height = Math.round((v.videoHeight / v.videoWidth) * 320);
-      const ctx = c.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-      ctx.drawImage(v, 0, 0, c.width, c.height);
-      const pixels = ctx.getImageData(0, 0, c.width, c.height).data,
-        data = new Uint8Array(c.width * c.height);
-      for (let i = 0; i < data.length; i++)
-        data[i] =
-          (pixels[i * 4] + pixels[i * 4 + 1] * 2 + pixels[i * 4 + 2]) / 4;
-      gray.current = { width: c.width, height: c.height, data };
-      if (gap > 500 && tracker.current.box) tracker.current.lost = true;
-      const result = tracker.current.update(gray.current);
-      setTrack(result);
-      if (result.box) {
-        const b = result.box;
-        trail.push({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
-        if (trail.length > 80) trail.shift();
-        ctx.strokeStyle = '#c8f28d';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(b.x, b.y, b.width, b.height);
-        ctx.beginPath();
-        trail.forEach((p, i) =>
-          i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y),
-        );
-        ctx.stroke();
-      } else trail.length = 0;
-      if (drag.current) {
-        ctx.strokeStyle = '#e8d995';
-        const end = dragEnd.current || drag.current;
-        ctx.strokeRect(
-          drag.current.x,
-          drag.current.y,
-          end.x - drag.current.x,
-          end.y - drag.current.y,
-        );
-      }
-      const rec = capture.current;
-      if (rec && rec.samples.length < 1800)
-        rec.samples.push({
-          elapsed_s: Math.max(0, (now - rec.started) / 1000),
-          received_monotonic_s: now / 1000 + rec.offset,
-          media_time_s: v.currentTime,
-          selection_id: selection.current,
-          status: result.status,
-          score: result.score,
-          box: result.box
-            ? [result.box.x, result.box.y, result.box.width, result.box.height]
-            : null,
-          dx: result.dx,
-          dy: result.dy,
-        });
     };
     frameId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frameId);
@@ -528,7 +530,7 @@ export function ExternalCamera() {
             : track.status === 'tracking'
               ? `Tracking · Δx ${track.dx?.toFixed(0)} / Δy ${track.dy?.toFixed(0)} px`
               : track.status === 'lost'
-                ? 'Target lost · select again'
+                ? 'Target lost · reacquiring / select again'
                 : 'Drag a box around the drone'}
         </strong>
         <span>
