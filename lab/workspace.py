@@ -80,7 +80,7 @@ class CameraFeed:
                         with self.lock:
                             self.rgb=rgb;self.jpeg=output.getvalue();self.seq+=1;self.last=now;self.times.append(now)
                             self.source='live' if live else 'recording'
-                            self.detail='Front camera · live' if live else 'Recorded flight · replay'
+                            self.detail='Front camera · live' if live else 'Demo flight · replay (no live link)'
                             if live:self.last_live_error=None
                 if live and not self.stop.is_set() and not self.retry.is_set():
                     with self.lock:self.last_live_error='Live stream unavailable; showing the recording'
